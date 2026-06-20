@@ -28,6 +28,25 @@ export interface HypTestResult {
   df?: number
 }
 
+export interface ConfidenceInterval {
+  lower: number
+  upper: number
+  mean: number
+  stdErr: number
+  level: number
+}
+
+export interface ComparisonScenario {
+  id: string
+  name: string
+  scenarioId: string
+  iterations: number
+  estimate: number
+  confidenceInterval: ConfidenceInterval
+  samples: number[]
+  color: string
+}
+
 function normalRandom(): number {
   let u = 0, v = 0
   while (u === 0) u = Math.random()
@@ -97,6 +116,45 @@ function runMC(scenario: MCScenario, n: number): MCResult {
   return { scenario: 'gambler', iterations: n, estimate: ruinCount / n, samples, convergence }
 }
 
+function getZScore(level: number): number {
+  const zTable: Record<number, number> = {
+    0.9: 1.645,
+    0.95: 1.96,
+    0.98: 2.326,
+    0.99: 2.576,
+    0.999: 3.291
+  }
+  if (zTable[level]) return zTable[level]
+  const p = (1 + level) / 2
+  return 4.91 * (p ** 0.14 - (1 - p) ** 0.14)
+}
+
+function calculateConfidenceInterval(samples: number[], level: number = 0.95): ConfidenceInterval {
+  const n = samples.length
+  const mean = samples.reduce((a, b) => a + b, 0) / n
+  const variance = samples.reduce((s, x) => s + (x - mean) ** 2, 0) / (n - 1)
+  const stdErr = Math.sqrt(variance / n)
+  const zCritical = getZScore(level)
+  return {
+    lower: mean - zCritical * stdErr,
+    upper: mean + zCritical * stdErr,
+    mean,
+    stdErr,
+    level
+  }
+}
+
+const COMPARISON_COLORS = [
+  '#06b6d4',
+  '#8b5cf6',
+  '#f59e0b',
+  '#10b981',
+  '#ef4444',
+  '#ec4899',
+  '#6366f1',
+  '#14b8a6'
+]
+
 export const SCENARIOS: MCScenario[] = [
   { id: 'pi', name: '圆周率π估算', description: '随机投点估算π值，观察收敛过程', params: {}, category: '基础' },
   { id: 'brownian', name: '布朗运动模拟', description: '粒子热运动随机路径模拟', params: { dt: 0.01 }, category: '物理' },
@@ -112,6 +170,9 @@ export const useMCStore = defineStore('mc', () => {
   const result = ref<MCResult | null>(null)
   const testResult = ref<HypTestResult | null>(null)
   const isRunning = ref(false)
+  const comparisonScenarios = ref<ComparisonScenario[]>([])
+  const confidenceLevel = ref(0.95)
+  let comparisonCounter = 0
 
   function runSimulation() {
     isRunning.value = true
@@ -133,6 +194,45 @@ export const useMCStore = defineStore('mc', () => {
 
   function setScenario(s: MCScenario) { currentScenario.value = s; result.value = null }
 
+  function addCurrentToComparison() {
+    if (!result.value) return
+    comparisonCounter++
+    const ci = calculateConfidenceInterval(result.value.samples, confidenceLevel.value)
+    const scenarioName = SCENARIOS.find(s => s.id === result.value!.scenario)?.name || result.value.scenario
+    comparisonScenarios.value.push({
+      id: `cmp-${comparisonCounter}`,
+      name: `${scenarioName} #${comparisonCounter}`,
+      scenarioId: result.value.scenario,
+      iterations: result.value.iterations,
+      estimate: result.value.estimate,
+      confidenceInterval: ci,
+      samples: [...result.value.samples],
+      color: COMPARISON_COLORS[(comparisonCounter - 1) % COMPARISON_COLORS.length]
+    })
+  }
+
+  function removeFromComparison(id: string) {
+    comparisonScenarios.value = comparisonScenarios.value.filter(s => s.id !== id)
+  }
+
+  function clearComparison() {
+    comparisonScenarios.value = []
+    comparisonCounter = 0
+  }
+
+  function setConfidenceLevel(level: number) {
+    confidenceLevel.value = level
+    comparisonScenarios.value.forEach(s => {
+      s.confidenceInterval = calculateConfidenceInterval(s.samples, level)
+    })
+  }
+
+  function checkOverlap(s1: ComparisonScenario, s2: ComparisonScenario): boolean {
+    const ci1 = s1.confidenceInterval
+    const ci2 = s2.confidenceInterval
+    return !(ci1.upper < ci2.lower || ci2.upper < ci1.lower)
+  }
+
   const convergenceData = computed(() => {
     if (!result.value) return [] as [number, number][]
     return result.value.convergence.slice(0, 200).map((v, i): [number, number] => [i, Math.round(v * 100000) / 100000])
@@ -148,5 +248,23 @@ export const useMCStore = defineStore('mc', () => {
     return { xAxis: Array.from({ length: bins }, (_, i) => Math.round((mn + i * bs) * 100) / 100), data: counts }
   })
 
-  return { currentScenario, iterations, result, testResult, isRunning, convergenceData, histogramData, runSimulation, runTest, setScenario }
+  return {
+    currentScenario,
+    iterations,
+    result,
+    testResult,
+    isRunning,
+    comparisonScenarios,
+    confidenceLevel,
+    convergenceData,
+    histogramData,
+    runSimulation,
+    runTest,
+    setScenario,
+    addCurrentToComparison,
+    removeFromComparison,
+    clearComparison,
+    setConfidenceLevel,
+    checkOverlap
+  }
 })
