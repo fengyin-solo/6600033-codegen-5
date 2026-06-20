@@ -40,6 +40,7 @@ export interface ComparisonScenario {
   id: string
   name: string
   scenarioId: string
+  scenario: MCScenario
   iterations: number
   estimate: number
   confidenceInterval: ConfidenceInterval
@@ -129,16 +130,59 @@ function getZScore(level: number): number {
   return 4.91 * (p ** 0.14 - (1 - p) ** 0.14)
 }
 
-function calculateConfidenceInterval(samples: number[], level: number = 0.95): ConfidenceInterval {
-  const n = samples.length
-  const mean = samples.reduce((a, b) => a + b, 0) / n
-  const variance = samples.reduce((s, x) => s + (x - mean) ** 2, 0) / (n - 1)
-  const stdErr = Math.sqrt(variance / n)
+function calculateResultConfidenceInterval(result: MCResult, scenario: MCScenario, level: number = 0.95): ConfidenceInterval {
+  const n = result.iterations
+  const samples = result.samples
+  const estimate = result.estimate
   const zCritical = getZScore(level)
+  let stdErr = 0
+
+  if (scenario.id === 'pi') {
+    const p = samples.reduce((a, b) => a + b, 0) / n
+    const scaleFactor = 4
+    stdErr = scaleFactor * Math.sqrt(p * (1 - p) / n)
+  } else if (scenario.id === 'gambler') {
+    const p = samples.reduce((a, b) => a + b, 0) / n
+    stdErr = Math.sqrt(p * (1 - p) / n)
+  } else if (scenario.id === 'option') {
+    const { r = 0.05, T = 1 } = scenario.params
+    const discountFactor = Math.exp(-r * T)
+    const sampleMean = samples.reduce((a, b) => a + b, 0) / n
+    const sampleVar = samples.reduce((s, x) => s + (x - sampleMean) ** 2, 0) / (n - 1)
+    stdErr = discountFactor * Math.sqrt(sampleVar / n)
+  } else if (scenario.id === 'brownian') {
+    const dt = scenario.params.dt || 0.01
+    const increments: number[] = []
+    increments.push(samples[0])
+    for (let i = 1; i < samples.length; i++) {
+      increments.push(samples[i] - samples[i - 1])
+    }
+    const incMean = increments.reduce((a, b) => a + b, 0) / increments.length
+    const incVar = increments.reduce((s, x) => s + (x - incMean) ** 2, 0) / (increments.length - 1)
+    stdErr = Math.sqrt(incVar / increments.length) * Math.sqrt(n)
+  } else if (scenario.id === 'random_walk') {
+    const increments: number[] = []
+    increments.push(samples[0])
+    for (let i = 1; i < samples.length; i++) {
+      increments.push(samples[i] - samples[i - 1])
+    }
+    const incMean = increments.reduce((a, b) => a + b, 0) / increments.length
+    const incVar = increments.reduce((s, x) => s + (x - incMean) ** 2, 0) / (increments.length - 1)
+    stdErr = Math.sqrt(incVar / increments.length) * Math.sqrt(n)
+  } else if (scenario.id === 'diffusion') {
+    const sampleMean = samples.reduce((a, b) => a + b, 0) / n
+    const sampleVar = samples.reduce((s, x) => s + (x - sampleMean) ** 2, 0) / (n - 1)
+    stdErr = Math.sqrt(sampleVar / n)
+  } else {
+    const sampleMean = samples.reduce((a, b) => a + b, 0) / n
+    const sampleVar = samples.reduce((s, x) => s + (x - sampleMean) ** 2, 0) / (n - 1)
+    stdErr = Math.sqrt(sampleVar / n)
+  }
+
   return {
-    lower: mean - zCritical * stdErr,
-    upper: mean + zCritical * stdErr,
-    mean,
+    lower: estimate - zCritical * stdErr,
+    upper: estimate + zCritical * stdErr,
+    mean: estimate,
     stdErr,
     level
   }
@@ -197,12 +241,13 @@ export const useMCStore = defineStore('mc', () => {
   function addCurrentToComparison() {
     if (!result.value) return
     comparisonCounter++
-    const ci = calculateConfidenceInterval(result.value.samples, confidenceLevel.value)
+    const ci = calculateResultConfidenceInterval(result.value, currentScenario.value, confidenceLevel.value)
     const scenarioName = SCENARIOS.find(s => s.id === result.value!.scenario)?.name || result.value.scenario
     comparisonScenarios.value.push({
       id: `cmp-${comparisonCounter}`,
       name: `${scenarioName} #${comparisonCounter}`,
       scenarioId: result.value.scenario,
+      scenario: { ...currentScenario.value },
       iterations: result.value.iterations,
       estimate: result.value.estimate,
       confidenceInterval: ci,
@@ -223,7 +268,14 @@ export const useMCStore = defineStore('mc', () => {
   function setConfidenceLevel(level: number) {
     confidenceLevel.value = level
     comparisonScenarios.value.forEach(s => {
-      s.confidenceInterval = calculateConfidenceInterval(s.samples, level)
+      const tempResult: MCResult = {
+        scenario: s.scenarioId,
+        iterations: s.iterations,
+        estimate: s.estimate,
+        samples: s.samples,
+        convergence: []
+      }
+      s.confidenceInterval = calculateResultConfidenceInterval(tempResult, s.scenario, level)
     })
   }
 
